@@ -1,0 +1,87 @@
+# macOS
+.DS_Store
+
+# Xcode user data
+xcuserdata/
+*.xcuserstate
+*.xcworkspace/xcuserdata/
+
+# Xcode build files
+build/
+DerivedData/
+*.moved-aside
+*.pbxuser
+!default.pbxuser
+*.mode1v3
+!default.mode1v3
+*.mode2v3
+!default.mode2v3
+*.perspectivev3
+!default.perspectivev3
+
+# Swift Package Manager
+.build/
+Packages/
+Package.resolved
+
+# CocoaPods
+Pods/
+
+# Carthage
+Carthage/Build/
+
+# Fastlane
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots/
+fastlane/test_output/
+
+# Firebase
+GoogleService-Info.plist
+
+# Archives
+*.xcarchive
+
+# App packaging
+*.ipa
+
+# Playground
+timeline.xctimeline
+playground.xcworkspace
+
+# SwiftPM generated files
+.swiftpm/
+Package.pins
+
+# Temporary files
+*.swp
+*.tmp
+*.temp
+
+# Logs
+*.log
+
+# Environment files
+.env
+.env.local
+
+# VSCode
+.vscode/
+
+# JetBrains
+.idea/
+
+# XCTest
+*.xccheckout
+*.xctestrun
+
+# Localization export
+*.xliff
+
+# Symbolication
+*.dSYM.zip
+*.dSYM
+
+# API Keys / Secrets
+Secrets.swift
+Config.swift
