@@ -40,14 +40,15 @@ final class SpacetimeARCoordinator: NSObject, ObservableObject {
     // MARK: - Physics
     
     private let physicsEngine = PhysicsEngine()
-    private var gridPoints: [[SIMD3<Float>]] = []
-    private var gridLineEntities: [[ModelEntity]] = []
+    private var gridMeshEntity: ModelEntity?
     
     // MARK: - Timing
     
     private var interactionStartTime: Date?
     private var displayLink: CADisplayLink?
     private var breathingPhase: Float = 0
+    private var frameCounter: Int = 0
+    private var particleAnimationTasks: [Task<Void, Never>] = []
     
     // MARK: - Constants
     
@@ -96,22 +97,20 @@ final class SpacetimeARCoordinator: NSObject, ObservableObject {
     func rebuildGrid() {
         guard let anchor = gridAnchor, state == .gridPlaced || state == .interactive else { return }
         
-        // Remove existing grid
+        cancelAllParticles()
+        
         gridEntity?.removeFromParent()
         gridEntity = nil
+        gridMeshEntity = nil
         
-        // Recreate with current style
         let grid = createGridEntity(opacity: 0.8, isGhost: false)
         anchor.addChild(grid)
         gridEntity = grid
         
-        // Restore mass entities to new anchor
         for (_, massEntity) in massEntities {
             massEntity.removeFromParent()
             anchor.addChild(massEntity)
         }
-        
-        updateGridDeformation()
         
         let impact = UIImpactFeedbackGenerator(style: .medium)
         impact.impactOccurred()
@@ -158,79 +157,129 @@ final class SpacetimeARCoordinator: NSObject, ObservableObject {
     
     private func createGridEntity(opacity: Float, isGhost: Bool) -> Entity {
         let parent = Entity()
+        let shouldDeform = (gridStyle == .dots) && !isGhost
         
-        let step = gridSize / Float(gridResolution - 1)
-        let offset = gridSize / 2
+        guard let mesh = generateGridMesh(deformed: shouldDeform) else { return parent }
         
-        gridPoints = []
-        gridLineEntities = []
-        
-        // Create grid points (dots) - always created for deformation tracking
-        for i in 0..<gridResolution {
-            var row: [SIMD3<Float>] = []
-            var lineRow: [ModelEntity] = []
-            
-            for j in 0..<gridResolution {
-                let x = Float(j) * step - offset
-                let z = Float(i) * step - offset
-                row.append(SIMD3<Float>(x, 0, z))
-                
-                // Create visible dot if in dots mode
-                if gridStyle == .dots || isGhost {
-                    let pointMesh = MeshResource.generateSphere(radius: 0.004)
-                    var material = SimpleMaterial()
-                    material.color = .init(tint: .darkGray.withAlphaComponent(CGFloat(opacity * 0.9)))
-                    material.metallic = .float(0.6)
-                    material.roughness = .float(0.2)
-                    
-                    let pointEntity = ModelEntity(mesh: pointMesh, materials: [material])
-                    pointEntity.position = SIMD3<Float>(x, 0, z)
-                    parent.addChild(pointEntity)
-                    lineRow.append(pointEntity)
-                } else {
-                    // Create invisible tracking entity for line mode
-                    let pointEntity = ModelEntity()
-                    pointEntity.position = SIMD3<Float>(x, 0, z)
-                    lineRow.append(pointEntity)
-                }
-            }
-            
-            gridPoints.append(row)
-            gridLineEntities.append(lineRow)
+        var material = SimpleMaterial()
+        if isGhost {
+            material.color = .init(tint: .cyan.withAlphaComponent(CGFloat(opacity * 0.5)))
+        } else if gridStyle == .dots {
+            material.color = .init(tint: .cyan.withAlphaComponent(CGFloat(opacity * 0.9)))
+        } else {
+            material.color = .init(tint: .cyan.withAlphaComponent(CGFloat(opacity * 0.8)))
         }
+        material.metallic = .float(0.4)
+        material.roughness = .float(0.4)
         
-        // Create grid lines only if in lines mode
-        if gridStyle == .lines && !isGhost {
-            createGridLines(parent: parent, opacity: opacity)
+        let gridModel = ModelEntity(mesh: mesh, materials: [material])
+        parent.addChild(gridModel)
+        
+        if !isGhost {
+            gridMeshEntity = gridModel
         }
         
         return parent
     }
     
-    private func createGridLines(parent: Entity, opacity: Float) {
+    // MARK: - Procedural Grid Mesh
+    
+    /// Generates a single grid mesh as connected line-segments (thin quads).
+    /// When `deformed` is true, mass-driven curvature is applied to vertex positions.
+    private func generateGridMesh(deformed: Bool) -> MeshResource? {
         let step = gridSize / Float(gridResolution - 1)
         let offset = gridSize / 2
         
-        var material = SimpleMaterial()
-        material.color = .init(tint: .cyan.withAlphaComponent(CGFloat(opacity * 0.6)))
-        material.metallic = .float(0.3)
-        material.roughness = .float(0.5)
+        // 1. Compute grid-point positions
+        var points: [[SIMD3<Float>]] = []
+        points.reserveCapacity(gridResolution)
         
         for i in 0..<gridResolution {
-            let z = Float(i) * step - offset
-            let lineMesh = MeshResource.generateBox(width: gridSize, height: 0.001, depth: 0.002)
-            let lineEntity = ModelEntity(mesh: lineMesh, materials: [material])
-            lineEntity.position = SIMD3<Float>(0, 0, z)
-            parent.addChild(lineEntity)
+            var row: [SIMD3<Float>] = []
+            row.reserveCapacity(gridResolution)
+            for j in 0..<gridResolution {
+                let x = Float(j) * step - offset
+                let z = Float(i) * step - offset
+                var y: Float = 0
+                
+                if deformed {
+                    for mass in physicsEngine.masses {
+                        let dx = x - mass.position.x
+                        let dz = z - mass.position.z
+                        let dist = sqrt(dx * dx + dz * dz)
+                        let sigma: Float = 0.15 * (1 + mass.mass * 0.1)
+                        y += -mass.mass * 0.03 * exp(-(dist * dist) / (2 * sigma * sigma))
+                    }
+                    y += sin(breathingPhase) * 0.002
+                }
+                
+                row.append(SIMD3<Float>(x, y, z))
+            }
+            points.append(row)
         }
         
-        for j in 0..<gridResolution {
-            let x = Float(j) * step - offset
-            let lineMesh = MeshResource.generateBox(width: 0.002, height: 0.001, depth: gridSize)
-            let lineEntity = ModelEntity(mesh: lineMesh, materials: [material])
-            lineEntity.position = SIMD3<Float>(x, 0, 0)
-            parent.addChild(lineEntity)
+        // 2. Build triangle mesh from thin quad segments
+        //    Each segment = 4 vertices + 2 triangles (6 indices)
+        let segmentCount = gridResolution * (gridResolution - 1) * 2 // horizontal + vertical
+        var positions: [SIMD3<Float>] = []
+        var normals:   [SIMD3<Float>] = []
+        var indices:   [UInt32] = []
+        positions.reserveCapacity(segmentCount * 4)
+        normals.reserveCapacity(segmentCount * 4)
+        indices.reserveCapacity(segmentCount * 6)
+        
+        let halfW: Float = 0.002
+        
+        // Horizontal lines
+        for i in 0..<gridResolution {
+            for j in 0..<(gridResolution - 1) {
+                appendSegmentQuad(from: points[i][j], to: points[i][j + 1],
+                                  halfWidth: halfW, positions: &positions,
+                                  normals: &normals, indices: &indices)
+            }
         }
+        
+        // Vertical lines
+        for j in 0..<gridResolution {
+            for i in 0..<(gridResolution - 1) {
+                appendSegmentQuad(from: points[i][j], to: points[i + 1][j],
+                                  halfWidth: halfW, positions: &positions,
+                                  normals: &normals, indices: &indices)
+            }
+        }
+        
+        guard !positions.isEmpty else { return nil }
+        
+        var descriptor = MeshDescriptor(name: "spacetimeGrid")
+        descriptor.positions = MeshBuffer(positions)
+        descriptor.normals   = MeshBuffer(normals)
+        descriptor.primitives = .triangles(indices)
+        
+        return try? MeshResource.generate(from: [descriptor])
+    }
+    
+    /// Appends a thin quad (two triangles) connecting two adjacent grid points.
+    private func appendSegmentQuad(from p1: SIMD3<Float>, to p2: SIMD3<Float>,
+                                   halfWidth: Float,
+                                   positions: inout [SIMD3<Float>],
+                                   normals:   inout [SIMD3<Float>],
+                                   indices:   inout [UInt32]) {
+        let dir = p2 - p1
+        guard simd_length(dir) > 1e-5 else { return }
+        
+        let forward = simd_normalize(dir)
+        let up = SIMD3<Float>(0, 1, 0)
+        var side = simd_cross(forward, up)
+        if simd_length(side) < 1e-5 { side = SIMD3<Float>(1, 0, 0) }
+        side = simd_normalize(side) * halfWidth
+        
+        let normal = SIMD3<Float>(0, 1, 0)
+        let base = UInt32(positions.count)
+        
+        positions.append(contentsOf: [p1 - side, p1 + side, p2 + side, p2 - side])
+        normals.append(contentsOf:   [normal, normal, normal, normal])
+        indices.append(contentsOf:   [base, base + 1, base + 2,
+                                      base, base + 2, base + 3])
     }
     
     // MARK: - Mass Management
@@ -248,7 +297,7 @@ final class SpacetimeARCoordinator: NSObject, ObservableObject {
         material.roughness = .float(0.2)
         
         let massEntity = ModelEntity(mesh: mesh, materials: [material])
-        massEntity.position = SIMD3<Float>(gridSize / 2 + 0.15, 0.1, 0)
+        massEntity.position = SIMD3<Float>(gridSize / 2 + 0.15, 0, 0)
         
         let glowMesh = MeshResource.generateSphere(radius: massRadius * 1.3)
         var glowMaterial = SimpleMaterial()
@@ -274,7 +323,7 @@ final class SpacetimeARCoordinator: NSObject, ObservableObject {
         
         let clampedPosition = SIMD3<Float>(
             min(max(localPosition.x, -gridSize / 2), gridSize / 2),
-            max(localPosition.y, 0),
+            0,
             min(max(localPosition.z, -gridSize / 2), gridSize / 2)
         )
         
@@ -304,36 +353,13 @@ final class SpacetimeARCoordinator: NSObject, ObservableObject {
     
     // MARK: - Grid Deformation
     
+    /// Regenerates the grid mesh with current mass-driven curvature.
+    /// Only applies in "Curved Space" mode; no-op for "Assumed Space".
     private func updateGridDeformation() {
-        guard !gridLineEntities.isEmpty else { return }
-        
-        let step = gridSize / Float(gridResolution - 1)
-        let offset = gridSize / 2
-        
-        for i in 0..<gridResolution {
-            for j in 0..<gridResolution {
-                let x = Float(j) * step - offset
-                let z = Float(i) * step - offset
-                
-                var yOffset: Float = 0
-                
-                for mass in physicsEngine.masses {
-                    let dx = x - mass.position.x
-                    let dz = z - mass.position.z
-                    let distance = sqrt(dx * dx + dz * dz)
-                    
-                    let sigma: Float = 0.15 * (1 + mass.mass * 0.1)
-                    let deformation = -mass.mass * 0.03 * exp(-distance * distance / (2 * sigma * sigma))
-                    yOffset += deformation
-                }
-                
-                yOffset += sin(breathingPhase) * 0.002
-                
-                if i < gridLineEntities.count && j < gridLineEntities[i].count {
-                    gridLineEntities[i][j].position = SIMD3<Float>(x, yOffset, z)
-                }
-            }
-        }
+        guard gridStyle == .dots, let meshEntity = gridMeshEntity else { return }
+        guard let newMesh = generateGridMesh(deformed: true) else { return }
+        let materials = meshEntity.model?.materials ?? []
+        meshEntity.model = ModelComponent(mesh: newMesh, materials: materials)
     }
     
     // MARK: - Particle Release
@@ -342,8 +368,8 @@ final class SpacetimeARCoordinator: NSObject, ObservableObject {
         guard let anchor = gridAnchor else { return }
         guard let mass = physicsEngine.masses.first else {
             // No mass - just shoot straight
-            let startPos = SIMD3<Float>(-gridSize / 2, 0.01, 0)
-            let path = [startPos, SIMD3<Float>(gridSize / 2, 0.01, 0)]
+            let startPos = SIMD3<Float>(-gridSize / 2, 0, 0)
+            let path = [startPos, SIMD3<Float>(gridSize / 2, 0, 0)]
             createAndAnimateParticle(at: startPos, path: path, anchor: anchor)
             return
         }
@@ -363,7 +389,7 @@ final class SpacetimeARCoordinator: NSObject, ObservableObject {
             let offsetDistance: Float = 0.25 + (0.15 / max(mass.mass, 0.5))
             startPos = position ?? SIMD3<Float>(
                 mass.position.x - offsetDistance,
-                0.01,
+                0,
                 mass.position.z + Float.random(in: 0.03...0.08) // Offset perpendicular to create fly-by
             )
             
@@ -379,7 +405,7 @@ final class SpacetimeARCoordinator: NSObject, ObservableObject {
             let offsetDistance: Float = 0.15 + (0.1 / max(mass.mass, 0.5))
             startPos = position ?? SIMD3<Float>(
                 mass.position.x - offsetDistance,
-                0.01,
+                0,
                 mass.position.z + Float.random(in: -0.02...0.02)
             )
             velocity = physicsEngine.calculateOrbitalVelocity(
@@ -393,7 +419,7 @@ final class SpacetimeARCoordinator: NSObject, ObservableObject {
             let offsetDistance: Float = 0.15 + (0.1 / max(mass.mass, 0.5))
             startPos = position ?? SIMD3<Float>(
                 mass.position.x - offsetDistance,
-                0.01,
+                0,
                 mass.position.z + Float.random(in: -0.02...0.02)
             )
             velocity = physicsEngine.calculateOrbitalVelocity(
@@ -447,20 +473,18 @@ final class SpacetimeARCoordinator: NSObject, ObservableObject {
     }
     
     private func animateParticle(_ particle: ModelEntity, along path: [SIMD3<Float>], index: Int) {
-        guard index < path.count else {
+        let task = Task { @MainActor [weak self, weak particle] in
+            for i in index..<path.count {
+                guard !Task.isCancelled, let particle = particle else { return }
+                particle.position = path[i]
+                try? await Task.sleep(for: .milliseconds(16))
+            }
+            // Animation complete — remove particle from scene
+            guard let self = self, let particle = particle else { return }
             particle.removeFromParent()
-            particleEntities.removeAll { $0 === particle }
-            return
+            self.particleEntities.removeAll { $0 === particle }
         }
-        
-        particle.position = path[index]
-        
-        // Faster frame rate for smooth orbital motion using Task
-        Task { @MainActor [weak self, weak particle] in
-            try? await Task.sleep(for: .milliseconds(16))
-            guard let particle = particle else { return }
-            self?.animateParticle(particle, along: path, index: index + 1)
-        }
+        particleAnimationTasks.append(task)
     }
     
     // MARK: - Breathing Animation
@@ -472,7 +496,10 @@ final class SpacetimeARCoordinator: NSObject, ObservableObject {
     
     @objc private func updateBreathing() {
         breathingPhase += 0.02
-        if state == .interactive || state == .gridPlaced {
+        frameCounter += 1
+        
+        // Throttle breathing-driven mesh regeneration to every 3rd frame
+        if (state == .interactive || state == .gridPlaced) && frameCounter % 3 == 0 {
             updateGridDeformation()
         }
         
@@ -543,11 +570,25 @@ final class SpacetimeARCoordinator: NSObject, ObservableObject {
         }
     }
     
+    // MARK: - Particle Cleanup
+    
+    private func cancelAllParticles() {
+        for task in particleAnimationTasks {
+            task.cancel()
+        }
+        particleAnimationTasks.removeAll()
+        for entity in particleEntities {
+            entity.removeFromParent()
+        }
+        particleEntities.removeAll()
+    }
+    
     // MARK: - Cleanup
     
     func cleanup() {
         displayLink?.invalidate()
         displayLink = nil
+        cancelAllParticles()
         arView?.session.pause()
     }
 }
